@@ -1,0 +1,10 @@
+{
+  "id": "chatgpt-ocr",
+  "name": "Handwriting to Markdown via Scriber",
+  "version": "1.0.0",
+  "minAppVersion": "0.12.0",
+  "description": "Processes pasted images in an Obsidian note with Scriber (ChatGPT) and inserts generated Markdown above the image.",
+  "author": "Runicfox",
+  "authorUrl": "https://chat.openai.com/",
+  "main": "main.js"
+}
