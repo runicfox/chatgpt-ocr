@@ -6,7 +6,10 @@ const { PluginSettingTab, Plugin, TFile, Notice, moment, Setting } = require('ob
 
 const DEFAULT_SETTINGS = {
   apiKey: '',
-  processedImages: {}
+  processedImages: {},
+  prompt: 'Your name is Scriber.  You are an expert in transcribing meeting notes from handwriting into Markdown.  You prioritize precision and accuracy when transcribing handwriting and will not attempt to change the content of the extracted text. If you are not confident in your interpretation of the handwriting, you will add italics to the relevant text. You include YAML front-matter properties for each file, including a property for the Date (taken form the handwriting source). When you encounter "With:" near the top of a page, you will include a list property for the names listed in the image.  Finally, you will use the extracted text to suggest tags based on the meeting content.',
+  referenceNotePath: '',
+  attachmentsFolder: 'Attachments'
 };
 
 module.exports = class ImageToMarkdownPlugin extends Plugin {
@@ -44,15 +47,14 @@ module.exports = class ImageToMarkdownPlugin extends Plugin {
 
         let imageFile = this.app.vault.getAbstractFileByPath(imagePath);
 
-        // If not found, try looking in the Attachments folder
         if (!(imageFile instanceof TFile)) {
-          const attachmentPath = `Attachments/${imagePath}`;
+          const attachmentPath = `${this.settings.attachmentsFolder}/${imagePath}`;
           imageFile = this.app.vault.getAbstractFileByPath(attachmentPath);
         }
 
         if (imageFile instanceof TFile) {
           const extension = imageFile.extension.toLowerCase();
-          if (!['png', 'jpg', 'jpeg'].includes(extension)) continue;
+          if (!["png", "jpg", "jpeg"].includes(extension)) continue;
 
           const arrayBuffer = await this.app.vault.readBinary(imageFile);
           const base64Image = this.arrayBufferToBase64(arrayBuffer);
@@ -68,21 +70,17 @@ module.exports = class ImageToMarkdownPlugin extends Plugin {
               const yaml = match[0];
               let body = clean.replace(yaml, '').trim();
 
-              // Look for markdown-style tag line like "**Tags:** AI, Obsidian"
               const tagLineMatch = body.match(/\*\*Tags:\*\*\s*(.+)/i);
               if (tagLineMatch) {
                 const tags = tagLineMatch[1].split(',').map(t => t.trim()).filter(Boolean);
                 allTags.push(...tags);
-                // Remove the tag line from the body
                 body = body.replace(tagLineMatch[0], '').trim();
               }
-
 
               if (!yamlBlock) {
                 yamlBlock = yaml.replace(/tags:\s*\[.*?\]\s*/gi, '').trim();
               }
 
-              // Remove any leftover YAML front matter blocks from body
               body = body.replace(/^---\n[\s\S]+?\n---/, '').trim();
 
               combinedBodies.push(body);
@@ -90,7 +88,6 @@ module.exports = class ImageToMarkdownPlugin extends Plugin {
               combinedBodies.push(clean);
             }
           }
-
         }
       }
 
@@ -102,15 +99,12 @@ module.exports = class ImageToMarkdownPlugin extends Plugin {
         if (yamlBlock) {
           let lines = yamlBlock.split('\n');
 
-          // Ensure the block ends with '---'
           if (lines[lines.length - 1].trim() !== '---') {
             lines.push('---');
           }
 
-          // Remove any existing 'tags:' lines
           lines = lines.filter(line => !line.trim().startsWith('tags:'));
 
-          // Insert tags before final '---'
           const endIndex = lines.lastIndexOf('---');
           if (tagLine && endIndex !== -1) {
             lines.splice(endIndex, 0, tagLine);
@@ -124,9 +118,7 @@ module.exports = class ImageToMarkdownPlugin extends Plugin {
         const finalMarkdown = `${finalYaml}\n\n${combinedBodies.join('\n\n')}`;
         const firstLink = imageLinks[0];
 
-        content = content.replace(firstLink, `${finalMarkdown}
-
-${firstLink}`);
+        content = content.replace(firstLink, `${finalMarkdown}\n\n${firstLink}`);
         await this.app.vault.modify(file, content);
         new Notice(`Scriber processed ${combinedBodies.length} image(s).`);
       } else {
@@ -135,44 +127,18 @@ ${firstLink}`);
     });
   }
 
-  async logActivity(message) {
-    const now = moment().format('YYYY-MM-DD HH:mm:ss');
-    const logNotePath = 'Scriber Log.md';
-    const entry = `\n[${now}] ${message}`;
-
-    const file = this.app.vault.getAbstractFileByPath(logNotePath);
-    if (file instanceof TFile) {
-      const current = await this.app.vault.read(file);
-      await this.app.vault.modify(file, current + entry);
-    } else {
-      await this.app.vault.create(logNotePath, `# Scriber Activity Log\n${entry}`);
-    }
-  }
-
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-  }
-
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
-  extractNewImageLinks(content) {
-    const regex = /!\[\[[^\]]+\.(png|jpg|jpeg)\]\]/gi;
-    return content.match(regex) || [];
-  }
-
-  arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-
   async sendToScriber(base64Image, extension) {
     try {
+      let prompt = this.settings.prompt;
+
+      if (this.settings.referenceNotePath) {
+        const refFile = this.app.vault.getAbstractFileByPath(this.settings.referenceNotePath);
+        if (refFile instanceof TFile) {
+          const refContent = await this.app.vault.read(refFile);
+          prompt += `\n\nReference terms and names:\n${refContent}`;
+        }
+      }
+
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -182,10 +148,7 @@ ${firstLink}`);
         body: JSON.stringify({
           model: 'gpt-4o',
           messages: [
-            {
-              role: 'system',
-              content: 'Your name is Scriber.  You are an expert in transcribing meeting notes from handwriting into Markdown.  You prioritize precision and accuracy when transcribing handwriting and will not attempt to change the content of the extracted text. If you are not confident in your interpretation of the handwriting, you will add italics to the relevant text. You include YAML front-matter properties for each file, including a property for the Date (taken form the handwriting source). When you encounter "With:" near the top of a page, you will include a list property for the names listed in the image.  Finally, you will use the extracted text to suggest tags based on the meeting content. When interpreting text, here is a list of words that are terms that are specific to my notes: '
-            },
+            { role: 'system', content: prompt },
             {
               role: 'user',
               content: [
@@ -214,6 +177,42 @@ ${firstLink}`);
       return null;
     }
   }
+
+  async logActivity(message) {
+    const now = moment().format('YYYY-MM-DD HH:mm:ss');
+    const logNotePath = 'Scriber Log.md';
+    const entry = `\n[${now}] ${message}`;
+
+    const file = this.app.vault.getAbstractFileByPath(logNotePath);
+    if (file instanceof TFile) {
+      const current = await this.app.vault.read(file);
+      await this.app.vault.modify(file, current + entry);
+    } else {
+      await this.app.vault.create(logNotePath, `# Scriber Activity Log\n${entry}`);
+    }
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  extractNewImageLinks(content) {
+    const regex = /!\[\[[^\]]+\.(png|jpg|jpeg)\]\]/gi;
+    return content.match(regex) || [];
+  }
+
+  arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
 };
 
 class ImageToMarkdownSettingTab extends PluginSettingTab {
@@ -236,6 +235,44 @@ class ImageToMarkdownSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.apiKey)
           .onChange(async (value) => {
             this.plugin.settings.apiKey = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('System Prompt')
+      .setDesc('Prompt Scriber uses for interpreting handwriting.')
+      .addTextArea(text =>
+        text
+          .setValue(this.plugin.settings.prompt)
+          .onChange(async (value) => {
+            this.plugin.settings.prompt = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Reference Note Path')
+      .setDesc('Path to a note containing names and vocabulary to provide Scriber.')
+      .addText(text =>
+        text
+          .setPlaceholder('Reference/terms.md')
+          .setValue(this.plugin.settings.referenceNotePath)
+          .onChange(async (value) => {
+            this.plugin.settings.referenceNotePath = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Attachments Folder')
+      .setDesc('Folder where pasted images are stored (default: Attachments)')
+      .addText(text =>
+        text
+          .setPlaceholder('Attachments')
+          .setValue(this.plugin.settings.attachmentsFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.attachmentsFolder = value;
             await this.plugin.saveSettings();
           })
       );
